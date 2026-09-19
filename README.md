@@ -287,6 +287,29 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。
 
+## Windows 字体（可选但推荐）
+
+Linux 上 cloakbrowser 默认把浏览器伪装成 Windows。如果系统里没有真实的 Windows 字体，字体指纹本身就是一条机器人特征（FingerprintJS 会因字体不匹配扣分），启动时也会打印 `Incomplete Windows font set` 警告。
+
+需要的 8 个字体是微软专有字体，apt 装不到，只能从真实 Windows 机器拷贝。仓库里的 `assets/fonts/windows-fonts.tar.gz.enc` 就是这样一份打包后加密的副本，workflow 在运行时解密安装到 `~/.local/share/fonts/windows/`。
+
+在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
+
+- `FONT_ARCHIVE_KEY`：解密该归档的口令。未配置时 workflow 会跳过字体安装并打印警告，不影响签到。
+
+安装后 workflow 会逐个核对 8 个字体是否已被 `fc-list` 识别，缺任何一个都会让该次运行失败，而不是静默降级。
+
+换机器或想换口令时，可以自行重新生成（注意 `FONT_ARCHIVE_KEY` 只存进 Environment secret，不要提交）：
+
+```bash
+tar czf windows-fonts.tar.gz -C /path/to/windows/Fonts \
+  segoeui.ttf segoeuil.ttf calibri.ttf marlett.ttf msgothic.ttc framd.ttf consola.ttf cour.ttf
+KEY=$(openssl rand -base64 32)
+KEY="$KEY" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+  -in windows-fonts.tar.gz -out assets/fonts/windows-fonts.tar.gz.enc -pass env:KEY
+echo "新的 FONT_ARCHIVE_KEY: $KEY"
+```
+
 ## 开启通知
 
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
