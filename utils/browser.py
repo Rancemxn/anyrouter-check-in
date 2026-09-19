@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -18,12 +18,11 @@ from utils.proxy import get_playwright_proxy
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
 
-EMAIL_LOGIN_BUTTON_NAMES = (
-	re.compile(r'邮箱或用户名'),
-	re.compile(r'使用.*邮箱'),
-	re.compile(r'Email or Username', re.I),
-	re.compile(r'Sign in with Email', re.I),
-	re.compile(r'Sign in with Email or Username', re.I),
+EMAIL_LOGIN_BUTTON_SELECTORS = (
+	'button:has-text("邮箱或用户名")',
+	'button:has-text("使用"):has-text("邮箱")',
+	'button:has-text("Email or Username")',
+	'button:has-text("Sign in with Email")',
 )
 EMAIL_LOGIN_ENTRY_SELECTORS = (
 	'.semi-card button:has(.semi-icon-mail):not(form.semi-form button)',
@@ -225,14 +224,15 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 		from cloakbrowser import launch_persistent_context_async
 
 		settings.profile_dir.mkdir(parents=True, exist_ok=True)
-		return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
+		persistent_context = await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
+		return cast('BrowserContext', persistent_context)
 
 	from cloakbrowser import launch_async
 
 	context_kwargs = {'viewport': launch_kwargs.pop('viewport')}
 	browser = await launch_async(**launch_kwargs)
 	context = await browser.new_context(**context_kwargs)
-	return _EphemeralBrowserContext(context, browser)
+	return cast('BrowserContext', _EphemeralBrowserContext(context, browser))
 
 
 def get_screenshot_dir() -> Path:
@@ -295,7 +295,10 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
-async def _wait_for_optional_load_state(page: Page, state: str, timeout_ms: int) -> bool:
+LoadState = Literal['domcontentloaded', 'load', 'networkidle']
+
+
+async def _wait_for_optional_load_state(page: Page, state: LoadState, timeout_ms: int) -> bool:
 	try:
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True
@@ -532,11 +535,11 @@ async def _wait_for_login_page_ready(page: Page, timeout_ms: int) -> None:
 		except Exception:  # nosec B112
 			continue
 
-	for pattern in EMAIL_LOGIN_BUTTON_NAMES:
+	for selector in EMAIL_LOGIN_BUTTON_SELECTORS:
 		if remaining_ms <= 0:
 			break
 		try:
-			await page.get_by_role('button', name=pattern).first.wait_for(state='visible', timeout=remaining_ms)
+			await page.locator(selector).first.wait_for(state='visible', timeout=remaining_ms)
 			return
 		except Exception:  # nosec B112
 			continue
@@ -555,10 +558,10 @@ async def _click_email_login_entry(page: Page) -> bool:
 			except Exception:  # nosec B112
 				continue
 
-	for pattern in EMAIL_LOGIN_BUTTON_NAMES:
+	for selector in EMAIL_LOGIN_BUTTON_SELECTORS:
 		for scope in (page.locator('.semi-card'), page):
 			try:
-				button = scope.get_by_role('button', name=pattern).first
+				button = scope.locator(selector).first
 				if await button.is_visible() and await _click_locator(button):
 					return True
 			except Exception:  # nosec B112

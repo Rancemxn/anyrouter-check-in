@@ -1,5 +1,6 @@
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -18,7 +19,7 @@ def test_browser_login_settings_records_profile_persistence(monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_launch_login_context_uses_persistent_context_when_enabled(monkeypatch, tmp_path):
 	calls = {}
-	context = SimpleNamespace()
+	context: Any = SimpleNamespace()
 
 	async def fake_launch_persistent_context_async(profile_dir, **kwargs):
 		calls['profile_dir'] = profile_dir
@@ -92,7 +93,7 @@ async def test_launch_login_context_closes_browser_for_ephemeral_context(monkeyp
 		persist_profile=settings.persist_profile,
 	)
 
-	context = await launch_login_context(settings)
+	context: Any = await launch_login_context(settings)
 	await context.close()
 
 	assert context.closed is True

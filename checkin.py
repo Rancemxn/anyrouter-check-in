@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from typing import cast
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
@@ -214,9 +215,14 @@ async def login_with_credentials(
 			return None
 
 		cookies = await context.cookies()
-		all_cookies = {
-			cookie.get('name'): cookie.get('value') for cookie in cookies if cookie.get('name') and cookie.get('value')
-		}
+		all_cookies = cast(
+			'dict[str, str]',
+			{
+				cookie.get('name'): cookie.get('value')
+				for cookie in cookies
+				if cookie.get('name') and cookie.get('value')
+			},
+		)
 		api_user = str(user_profile['id']) if user_profile.get('id') is not None else None
 
 		success_msg = f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies'

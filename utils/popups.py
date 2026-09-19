@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
 	from playwright.async_api import Page
 
 _MODAL_SELECTOR = 'div[role="dialog"][aria-modal="true"]'
-_CLOSE_ANNOUNCEMENT = re.compile(r'关闭公告|Close Notice', re.I)
-_DISMISS_TODAY = re.compile(r'今日关闭|Close Today', re.I)
+_CLOSE_ANNOUNCEMENT = 'button:has-text("关闭公告"), button:has-text("Close Notice")'
+_DISMISS_TODAY = 'button:has-text("今日关闭"), button:has-text("Close Today")'
 
 _DISMISS_MODALS_CORE_JS = """
 	const isVisible = (el) => {
@@ -210,8 +209,8 @@ async def _dismiss_popups_playwright(page: Page) -> int:
 					continue
 			except Exception:  # nosec B110
 				pass
-			for pattern in (_CLOSE_ANNOUNCEMENT, _DISMISS_TODAY):
-				button = modal.get_by_role('button', name=pattern).first
+			for selector in (_CLOSE_ANNOUNCEMENT, _DISMISS_TODAY):
+				button = modal.locator(selector).first
 				try:
 					if await button.is_visible():
 						await button.click(timeout=3000)
