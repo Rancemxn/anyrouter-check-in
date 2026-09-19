@@ -49,6 +49,36 @@ jobs:
         sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
           fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
 
+    - name: 安装 Windows 字体
+      env:
+        FONT_ARCHIVE_KEY: ${{ secrets.FONT_ARCHIVE_KEY }}
+      run: |
+        if [ -z "$FONT_ARCHIVE_KEY" ]; then
+          echo "::warning::FONT_ARCHIVE_KEY 未配置，跳过 Windows 字体安装"
+          exit 0
+        fi
+        mkdir -p ~/.local/share/fonts/windows
+        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+          -in assets/fonts/windows-fonts.tar.gz.enc \
+          -pass env:FONT_ARCHIVE_KEY | tar xz -C ~/.local/share/fonts/windows
+        fc-cache -f > /dev/null
+        # 与 cloakbrowser 内部判定一致：fc-list 小写输出做子串匹配
+        listing=$(fc-list | tr 'A-Z' 'a-z')
+        missing=0
+        for font in "Segoe UI" "Segoe UI Light" "Calibri" "Marlett" "MS UI Gothic" "Franklin Gothic" "Consolas" "Courier New"; do
+          if printf '%s' "$listing" | grep -qF "$(printf '%s' "$font" | tr 'A-Z' 'a-z')"; then
+            echo "  ✓ $font"
+          else
+            echo "  ✗ $font"
+            missing=$((missing + 1))
+          fi
+        done
+        if [ "$missing" -ne 0 ]; then
+          echo "::error::$missing 个 Windows 字体未注册，cloakbrowser 的 Windows 伪装会降级"
+          exit 1
+        fi
+        echo "✅ Windows 字体 8/8 就位"
+
     - name: 缓存 CloakBrowser 二进制
       uses: actions/cache@v6
       id: cloakbrowser-cache
