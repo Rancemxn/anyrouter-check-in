@@ -10,6 +10,7 @@ coverage.xml
 htmlcov
 balance_hash.txt
 .browser_profiles
+.secrets/
 checkin_screenshots
 
 .DS_Store

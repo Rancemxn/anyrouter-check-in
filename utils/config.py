@@ -4,9 +4,35 @@
 """
 
 import json
+import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Literal
+
+
+def validate_github_cookies(cookies: object, *, check_expiry: bool = True) -> list[dict]:
+	"""只接受 GitHub 域的浏览器 Cookie；错误信息不包含凭证。"""
+	if not isinstance(cookies, list) or not cookies:
+		raise ValueError('github_cookies must be a non-empty browser cookie array')
+	allowed = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure', 'sameSite'}
+	result = []
+	for cookie in cookies:
+		if not isinstance(cookie, dict) or cookie.get('domain') not in {'github.com', '.github.com'}:
+			raise ValueError('github_cookies must contain only github.com cookies')
+		if any(not isinstance(cookie.get(key), str) or not cookie[key] for key in ('name', 'value', 'path')):
+			raise ValueError('github_cookies contains an invalid cookie')
+		if not cookie['path'].startswith('/') or 'url' in cookie:
+			raise ValueError('github_cookies contains an invalid cookie scope')
+		expires = cookie.get('expires', -1)
+		if not isinstance(expires, (int, float)) or not math.isfinite(expires):
+			raise ValueError('github_cookies contains an invalid expiry')
+		if check_expiry and expires != -1 and expires <= time.time():
+			continue
+		result.append({key: value for key, value in cookie.items() if key in allowed})
+	if not any(cookie['name'] == 'user_session' for cookie in result):
+		raise ValueError('GitHub session missing or expired; export the session again')
+	return result
 
 
 @dataclass
@@ -98,7 +124,7 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,  # 通过登录回调的 checked_in 字段确认签到
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
@@ -155,6 +181,7 @@ class AccountConfig:
 	name: str | None = None
 	email: str | None = None
 	password: str | None = None
+	github_cookies: list[dict] | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -169,6 +196,7 @@ class AccountConfig:
 			name=name if name else None,
 			email=data.get('email'),
 			password=data.get('password'),
+			github_cookies=data.get('github_cookies'),
 		)
 
 	def has_login_credentials(self) -> bool:
@@ -205,6 +233,22 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
+			has_github = 'github_cookies' in account_dict
+			if has_github:
+				if account_dict.get('provider') != 'agentrouter':
+					print(f'ERROR: Account {i + 1}: github_cookies requires provider=agentrouter')
+					return None
+				try:
+					account_dict['github_cookies'] = validate_github_cookies(
+						account_dict['github_cookies'], check_expiry=False
+					)
+				except ValueError as exc:
+					print(f'ERROR: Account {i + 1}: {exc}')
+					return None
+				if not str(account_dict.get('api_user', '')).isdigit():
+					print(f'ERROR: Account {i + 1}: GitHub login requires api_user to verify account identity')
+					return None
+
 			if 'api_user' not in account_dict:
 				has_login = account_dict.get('email') and account_dict.get('password')
 				if not has_login:
@@ -216,8 +260,8 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 
-			if not has_cookies and not has_login:
-				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
+			if not has_cookies and not has_login and not has_github:
+				print(f'ERROR: Account {i + 1} must have cookies, email+password or github_cookies')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:

@@ -34,10 +34,11 @@ from utils.browser import (
 	verify_browser_login,
 	wait_for_waf_ready,
 )
-from utils.config import AccountConfig, AppConfig, load_accounts_config
+from utils.config import AccountConfig, AppConfig, load_accounts_config, validate_github_cookies
 from utils.debug import debug_print, is_debug_enabled
+from utils.github_oauth import GitHubLoginRequired, login_with_github
 from utils.notify import notify
-from utils.proxy import get_playwright_proxy, get_proxy_server
+from utils.proxy import activate_proxy, get_playwright_proxy, get_proxy_server, proxy_candidates
 
 load_dotenv()
 
@@ -203,7 +204,13 @@ async def login_with_credentials(
 			print(f'[INFO] {account_name}: Browser profile already logged in')
 
 		console_url = f'{provider_config.domain}/console'
-		user_profile = await verify_browser_login(page, console_url, timeout_ms)
+		user_profile = await verify_browser_login(
+			page,
+			console_url,
+			timeout_ms,
+			user_info_path=provider_config.user_info_path,
+			api_user_key=provider_config.api_user_key,
+		)
 		if not user_profile:
 			cookies = await context.cookies()
 			cookie_names = [c.get('name') for c in cookies if c.get('name')]
@@ -214,7 +221,7 @@ async def login_with_credentials(
 			await context.close()
 			return None
 
-		cookies = await context.cookies()
+		cookies = await context.cookies(provider_config.domain)
 		all_cookies = cast(
 			'dict[str, str]',
 			{
@@ -246,7 +253,10 @@ def get_user_info(client, headers, user_info_url: str):
 		response = client.get(user_info_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
-			data = response.json()
+			try:
+				data = response.json()
+			except ValueError:
+				return {'success': False, 'error': '余额接口返回非 JSON 内容（可能为 HTML/WAF 验证页，HTTP 200）'}
 			if data.get('success'):
 				user_data = data.get('data', {})
 				quota = round(user_data.get('quota', 0) / 500000, 2)
@@ -339,7 +349,11 @@ def format_check_in_notification(detail: dict) -> str:
 		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
 
 		if not has_reward and has_usage:
-			lines.append('  今日已签到（期间有使用）')
+			lines.append(
+				'  本次未确认奖励（期间有使用）'
+				if detail.get('check_in_status') == 'unconfirmed'
+				else '  今日已签到（期间有使用）'
+			)
 
 		if has_reward:
 			lines.append(f'  签到获得: +${detail["check_in_reward"]:.2f}')
@@ -351,12 +365,54 @@ def format_check_in_notification(detail: dict) -> str:
 			change_symbol = '+' if detail['balance_change'] > 0 else ''
 			lines.append(f'  余额变化: {change_symbol}${detail["balance_change"]:.2f}')
 	else:
-		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
+		message = (
+			'余额无变化，未确认本次签到奖励' if detail.get('check_in_status') == 'unconfirmed' else '今日已签到，无变化'
+		)
+		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', f'  {message}'])
 
 	return '\n'.join(lines)
 
 
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
+	"""按账号筛选代理；一个 OAuth 流程固定出口，失败后才换节点。"""
+	if account.github_cookies:
+		try:
+			validate_github_cookies(account.github_cookies)
+		except ValueError as exc:
+			return False, None, {'success': False, 'error': str(exc)}
+	provider = app_config.get_provider(account.provider)
+	candidates: list[str | None] = [None]
+	urls = []
+	if provider and provider.use_proxy:
+		if os.getenv('CHECKIN_PROXY_CONFIGURED') == 'true' and not get_proxy_server():
+			return False, None, {'success': False, 'error': '订阅代理启动失败，未使用直连'}
+		if os.getenv('CHECKIN_PROXY_CONTROLLER'):
+			urls = [f'{provider.domain}{provider.login_path}']
+			if account.github_cookies:
+				urls.insert(0, 'https://github.com/login')
+			try:
+				attempts = max(1, min(10, int(os.getenv('CHECKIN_PROXY_ATTEMPTS', '3'))))
+				candidates = list((await proxy_candidates(urls))[:attempts])
+			except Exception as exc:
+				print(f'[FAILED] Proxy screening failed ({type(exc).__name__})')
+				return False, None, {'success': False, 'error': '代理节点筛选失败'}
+	result: tuple[bool, dict | None, dict | None] = (False, None, {'success': False, 'error': '没有可用代理节点'})
+	for attempt, node in enumerate(candidates, 1):
+		if node is not None:
+			print(f'[PROXY] Trying screened node {attempt}/{len(candidates)}')
+			if not await activate_proxy(node, urls):
+				continue
+		try:
+			result = await _check_in_account_once(account, account_index, app_config)
+		except GitHubLoginRequired as exc:
+			print(f'[FAILED] {exc}')
+			return False, None, {'success': False, 'error': str(exc)}
+		if result[0]:
+			return result
+	return result
+
+
+async def _check_in_account_once(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作"""
 	account_name = account.get_display_name(account_index)
 	print(f'\n[PROCESSING] Starting to process {account_name}')
@@ -367,6 +423,33 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	if account.github_cookies:
+		try:
+			github_login = await login_with_github(
+				account_name, provider_config, account.github_cookies, str(account.api_user)
+			)
+			_, _, after = await asyncio.to_thread(
+				run_check_in_requests,
+				github_login.cookies,
+				account,
+				account_name,
+				provider_config,
+				api_user_override=github_login.api_user,
+				use_proxy=provider_config.use_proxy,
+			)
+			if after is None:
+				after = {'success': False, 'error': '登录回调已成功，但余额信息暂不可用'}
+			after['check_in_status'] = 'rewarded' if github_login.checked_in is True else 'unconfirmed'
+			print(f'[INFO] {account_name}: OAuth login completed; checked_in={github_login.checked_in}')
+			# 查询发生在登录之后，不能把这里的余额冒充签到前余额。
+			return True, None, after
+		except GitHubLoginRequired:
+			raise
+		except Exception as exc:
+			# 浏览器异常可能带有 code/state，OAuth 分支不打印详情，也不截图。
+			print(f'[FAILED] {account_name}: GitHub OAuth failed ({type(exc).__name__})')
+			return False, None, {'success': False, 'error': 'GitHub OAuth 登录失败，请检查节点或重新导出会话'}
 
 	# 邮箱密码优先
 	all_cookies = None
@@ -468,10 +551,11 @@ def run_check_in_requests(
 
 			user_info_after = get_user_info(client, headers, user_info_url)
 			if user_info_after and user_info_after.get('success'):
-				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+				user_info_after['check_in_status'] = 'unconfirmed'
+				print(f'[INFO] {account_name}: User info retrieved; reward requires login callback confirmation')
 				return True, user_info_before, user_info_after
 			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
-			print(f'[FAILED] {account_name}: Auto check-in failed - {error}')
+			print(f'[WARN] {account_name}: User info unavailable - {error}')
 			return False, user_info_before, user_info_after
 
 	except Exception as e:
@@ -562,7 +646,17 @@ async def main():
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
 						'success': success,
+						'check_in_status': user_info_after.get('check_in_status'),
 					}
+			if success and user_info_before is None and user_info_after:
+				status = (
+					'签到奖励已由登录回调确认'
+					if user_info_after.get('check_in_status') == 'rewarded'
+					else '已登录，未确认本次签到奖励（可能已领取）'
+				)
+				balance = user_info_after.get('display') or user_info_after.get('error', '余额暂不可用')
+				notification_content.append(f'[INFO] {account.get_display_name(i)}\n{status}\n{balance}')
+				need_notify = True
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)
@@ -614,9 +708,9 @@ async def main():
 		]
 
 		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
+			summary.append('[SUCCESS] All accounts processed; see individual reward status')
 		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
+			summary.append('[WARN] Some accounts processed; see individual reward status')
 		else:
 			summary.append('[ERROR] All accounts check-in failed')
 

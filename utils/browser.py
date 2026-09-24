@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import urlsplit
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -142,6 +143,7 @@ _OPEN_EMAIL_FORM_JS = """() => {
 class BrowserLoginResult:
 	cookies: dict[str, str]
 	api_user: str | None = None
+	checked_in: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -376,7 +378,7 @@ async def has_session_cookie(page: Page) -> bool:
 
 
 def _extract_user_profile(payload: object) -> dict | None:
-	if not isinstance(payload, dict):
+	if not isinstance(payload, dict) or payload.get('success') is False:
 		return None
 	data = payload.get('data')
 	if payload.get('success') is True and isinstance(data, dict) and data.get('id'):
@@ -384,16 +386,6 @@ def _extract_user_profile(payload: object) -> dict | None:
 	if payload.get('id'):
 		return payload
 	return None
-
-
-async def _parse_user_self_response(response) -> dict | None:
-	if USER_SELF_API_SUFFIX not in response.url or response.status != 200:
-		return None
-	try:
-		payload = await response.json()
-	except Exception:  # nosec B110
-		return None
-	return _extract_user_profile(payload)
 
 
 async def is_logged_in(page: Page) -> bool:
@@ -430,52 +422,64 @@ async def wait_for_logged_in(page: Page, timeout_ms: int = SESSION_WAIT_TIMEOUT_
 	return False
 
 
-async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) -> dict | None:
-	"""跳转 /console 并拦截 /api/user/self，用浏览器会话确认登录用户。"""
-	verify_timeout = min(timeout_ms, SESSION_WAIT_TIMEOUT_MS)
-	captured_profile: dict | None = None
-	verified = asyncio.Event()
-
-	async def on_response(response) -> None:
-		nonlocal captured_profile
-		if captured_profile is not None:
-			return
-		profile = await _parse_user_self_response(response)
-		if profile:
-			captured_profile = profile
-			verified.set()
-
-	page.on('response', on_response)
+async def verify_browser_login(
+	page: Page,
+	console_url: str,
+	timeout_ms: int,
+	*,
+	user_info_path: str = USER_SELF_API_SUFFIX,
+	api_user_key: str = 'new-api-user',
+) -> dict | None:
+	"""主动用浏览器会话查询用户；localStorage 仅提供请求头，认证以服务器响应为准。"""
+	target = urlsplit(console_url)
+	current = urlsplit(page.url)
 	try:
-		print(f'[INFO] Verifying login via {console_url} and {USER_SELF_API_SUFFIX}')
-		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
-		try:
-			await page.wait_for_load_state('networkidle', timeout=20_000)
-		except Exception:  # nosec B110
-			pass
-
-		if captured_profile is None:
-			try:
-				await asyncio.wait_for(verified.wait(), timeout=verify_timeout / 1000)
-			except TimeoutError:
-				pass
-	finally:
-		page.remove_listener('response', on_response)
-
-	if captured_profile:
-		if is_debug_enabled():
-			user_id = captured_profile.get('id')
-			username = captured_profile.get('username', '')
-			print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
-		else:
-			print('[INFO] Login verified')
-		return captured_profile
-
-	if CONSOLE_PATH in page.url.lower():
-		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
+		print(f'[INFO] Verifying browser session via {user_info_path}')
+		if (current.scheme, current.netloc) != (target.scheme, target.netloc) or not current.path.startswith(
+			CONSOLE_PATH
+		):
+			await page.goto(console_url, wait_until='domcontentloaded', timeout=min(timeout_ms, 60_000))
+		result = await page.evaluate(
+			"""async ({url, apiUserKey, timeout}) => {
+				if (new URL(url).origin !== location.origin) return {status: 0, hasUserId: false};
+				let user;
+				try { user = JSON.parse(localStorage.getItem('user') || 'null'); } catch {}
+				const headers = {Accept: 'application/json'};
+				const hasUserId = user?.id != null;
+				if (hasUserId) headers[apiUserKey] = String(user.id);
+				const response = await fetch(url, {
+					headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+					signal: AbortSignal.timeout(timeout),
+				});
+				const text = await response.text();
+				let payload = null;
+				try { payload = JSON.parse(text); } catch {}
+				return {
+					status: response.status, payload, hasUserId,
+					isHtml: (response.headers.get('content-type') || '').includes('text/html'),
+					isWaf: /aliyun_waf|aliyunCaptcha|verify you are human/i.test(text),
+				};
+			}""",
+			{
+				'url': f'{target.scheme}://{target.netloc}{user_info_path}',
+				'apiUserKey': api_user_key,
+				'timeout': min(timeout_ms, SESSION_WAIT_TIMEOUT_MS),
+			},
+		)
+	except Exception as exc:
+		print(f'[WARN] Login verification request failed ({type(exc).__name__})')
+		return None
+	profile = _extract_user_profile(result.get('payload')) if result['status'] == 200 else None
+	if profile:
+		print('[INFO] Login verified by server')
+		return profile
+	if result.get('isWaf') or result.get('isHtml'):
+		print(f'[WARN] User info request returned an HTML/WAF verification page (HTTP {result["status"]})')
 	else:
-		debug_print(f'[WARN] Login verification failed: current URL={page.url}')
-		print('[WARN] Login verification failed')
+		payload = result.get('payload')
+		success = payload.get('success') if isinstance(payload, dict) else None
+		print(f'[WARN] User info response: JSON object={isinstance(payload, dict)}, success is true={success is True}')
+	print(f'[WARN] Login verification failed: HTTP {result["status"]}, saved user ID present={result["hasUserId"]}')
 	return None
 
 

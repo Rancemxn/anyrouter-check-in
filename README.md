@@ -71,7 +71,7 @@
   },
   {
     "name": "备用账号",
-    "provider": "agentrouter",
+    "provider": "anyrouter",
     "email": "account2@example.com",
     "password": "account2_password"
   }
@@ -82,6 +82,7 @@
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
 - `cookies`：兼容旧版的 session cookies 登录方式
+- `github_cookies`：AgentRouter 的 GitHub 浏览器会话，使用下方脚本导出；配置后优先于邮箱密码与旧 session
 - `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
@@ -101,6 +102,33 @@
 通过 F12 工具，切到 Network 面板，可以过滤下，只要 Fetch/XHR，找到带 `New-Api-User`，这个值正常是 5 位数，如果是负数或者个位数，正常是未登录。
 
 ![获取 api_user](./assets/request-api-user.png)
+
+### AgentRouter：GitHub OAuth + 托管 Actions
+
+AgentRouter 的登录回调会返回 `checked_in`。脚本每次用新的临时浏览器恢复 GitHub Cookie，再完成一次 OAuth；只有回调明确返回 `checked_in: true` 才报告本次奖励已确认。仅查询 `/api/user/self` 不能证明签到成功。
+
+在你自己的电脑上运行一次（不需要 VPS）：
+
+```bash
+uv sync --frozen
+uv run python -m cloakbrowser install
+uv run python -m scripts.export_github_session --name AgentRouter
+```
+
+1. 在弹出的专用浏览器中，手动点击 GitHub 登录，完成密码、二次验证和 AgentRouter 授权。
+2. 看到 AgentRouter 控制台后，回到终端按回车。程序通过本次 GitHub OAuth 登录回调确认账号，把配置写入 `.secrets/agentrouter.json`，不会打印 Cookie。监听覆盖授权新窗口；如果尚未捕获成功回调，浏览器会保持打开，可继续完成授权后再次按回车。
+3. 将文件中的账号对象合并到 `production` 环境的 **`ANYROUTER_ACCOUNTS` Secret** 数组中；若只有这个账号，可直接把整个文件内容作为 Secret。保留原有 AnyRouter 账号。
+4. 需要代理时，再配置 **`PROXY_SUBSCRIPTION_URL` Secret**，然后手动运行签到 workflow。
+
+导出配置包含 `provider: "agentrouter"`、`api_user` 和 `github_cookies`。`api_user` 用来核对 OAuth 登录后的账号，避免使用错误的 GitHub 会话。多账号可分别导出，例如 `--name AgentRouter2 --output .secrets/agentrouter2.json`，再合并到同一个 Secret（总大小不得超过 GitHub 的 48 KB 限制）。
+
+这里保存的是 **GitHub 浏览器会话**，不是一次性的 OAuth `code`，也不是 PAT / Actions 的 `GITHUB_TOKEN`。Actions 每次从 Secret 读取，OAuth 分支不会保存 Profile、截图或会话 artifact。只将 AgentRouter 域的 Cookie 传给其余额接口，GitHub Cookie 留在临时浏览器中。`.secrets/` 已被 Git 忽略，导出文件本身是本地明文，请勿提交或分享。
+
+GitHub 可能因会话过期或新环境要求再次验证；日志提示重新导出时，在本地重做以上步骤并更新 Secret。脚本不会自动修改 Secret，也不保证永久免验证。`checked_in: false` 或缺失时会显示“未确认本次奖励（可能已领取）”。
+
+`/api/user/self` 可能返回 HTTP 200 的 HTML/WAF 验证页。导出过程直接使用登录回调，不额外查询这个接口。Actions 会分别报告回调确认的签到结果和余额查询状态：余额查询被拦截时，不会推翻已经确认的奖励或重复执行 OAuth。
+
+本地导出若也需要代理，可在 `.env` 设置 `CHECKIN_PROXY_URL=http://127.0.0.1:7890`，使用你电脑上已经启动的代理。
 
 ### 5. 启用 GitHub Actions
 
@@ -262,7 +290,7 @@
   - `sign_in_path: "/api/user/sign_in"`
 - `agentrouter`：
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
-  - `sign_in_path: null`（查询用户信息时自动签到）
+  - `sign_in_path: null`（GitHub OAuth 登录回调确认签到；旧 Cookie 配置只查询余额）
   - `use_proxy: true`
 
 **重要提示**：
@@ -285,7 +313,11 @@ CHECKIN_PROXY_URL=http://127.0.0.1:7890
 PROVIDERS={"agentrouter":{"use_proxy":true}}
 ```
 
-如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。
+订阅脚本启动本地 mihomo 后，签到程序会并发筛选节点：GitHub OAuth 账号同时测试 GitHub 和服务商登录页，其他账号测试服务商登录页。筛选通过后按延迟排序，再通过本地代理验证真实 HTTP 请求。
+
+每次登录期间固定一个节点，失败后才切换到下一个，默认最多尝试 3 个节点。可修改 workflow 中的 `CHECKIN_PROXY_ATTEMPTS`（1–10）；本地也可设置同名环境变量。GitHub 明确要求重新登录或账号不匹配时停止重试，提示更新凭证。
+
+配置了订阅但启动失败或没有可用节点时，需要代理的账号会失败并通知，不会悄悄改用直连；`use_proxy: false` 的账号仍独立执行。mihomo 控制接口仅监听本机并使用随机认证密钥，订阅内容、节点名称和控制密钥不写入普通日志或 artifact。
 
 ## Windows 字体（可选但推荐）
 
@@ -456,4 +488,3 @@ uv run pytest tests/ --cov=.
 ## 免责声明
 
 本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.
-
