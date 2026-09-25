@@ -10,6 +10,7 @@ import os
 import sys
 from datetime import datetime
 from typing import cast
+from urllib.parse import urlsplit
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
@@ -177,6 +178,29 @@ async def login_with_credentials(
 		return None
 
 	page = None
+	access_token = None
+
+	async def capture_access_token(response):
+		nonlocal access_token
+		# 新版 NewAPI 使用短期 Bearer Token；仅接收本站登录/刷新接口的成功响应。
+		source, target = urlsplit(response.url), urlsplit(provider_config.domain)
+		if (source.scheme, source.netloc) != (target.scheme, target.netloc) or source.path not in {
+			'/api/user/login',
+			'/api/user/auth/refresh',
+		}:
+			return
+		if response.status != 200:
+			return
+		try:
+			payload = await response.json()
+		except Exception:
+			return
+		if isinstance(payload, dict) and payload.get('success') is True and isinstance(payload.get('data'), dict):
+			token = payload['data'].get('access_token')
+			if isinstance(token, str) and token:
+				access_token = token
+
+	context.on('response', capture_access_token)
 	try:
 		page = await context.new_page()
 		await prepare_browser_page(page)
@@ -210,6 +234,7 @@ async def login_with_credentials(
 			timeout_ms,
 			user_info_path=provider_config.user_info_path,
 			api_user_key=provider_config.api_user_key,
+			access_token=access_token,
 		)
 		if not user_profile:
 			cookies = await context.cookies()
@@ -218,7 +243,6 @@ async def login_with_credentials(
 			debug_print(f'[INFO] {account_name}: Current URL: {page.url}')
 			debug_print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
 			await save_login_screenshot(page, provider_name, account_name, 'not-authenticated')
-			await context.close()
 			return None
 
 		cookies = await context.cookies(provider_config.domain)
@@ -236,15 +260,16 @@ async def login_with_credentials(
 		if is_debug_enabled() and api_user:
 			success_msg += f', api_user={api_user}'
 		print(success_msg)
-		await context.close()
-		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
+		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, access_token=access_token)
 
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error during login: {e}')
 		if page is not None:
 			await save_login_screenshot(page, provider_name, account_name, 'login-error')
-		await context.close()
 		return None
+	finally:
+		context.remove_listener('response', capture_access_token)
+		await context.close()
 
 
 def get_user_info(client, headers, user_info_url: str):
@@ -454,6 +479,7 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 	# 邮箱密码优先
 	all_cookies = None
 	resolved_api_user: str | None = None
+	access_token = None
 	auth_method = None
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
@@ -468,6 +494,7 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 		if login_result:
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
+			access_token = login_result.access_token
 			auth_method = 'email/password'
 		else:
 			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
@@ -480,18 +507,19 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
-	if not all_cookies:
+	if not all_cookies and not access_token:
 		return False, None, None
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
 	return run_check_in_requests(
-		all_cookies,
+		all_cookies or {},
 		account,
 		account_name,
 		provider_config,
 		api_user_override=resolved_api_user,
 		use_proxy=provider_config.use_proxy,
+		access_token=access_token,
 	)
 
 
@@ -503,6 +531,7 @@ def run_check_in_requests(
 	*,
 	api_user_override: str | None = None,
 	use_proxy: bool = False,
+	access_token: str | None = None,
 ) -> tuple[bool, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
@@ -536,6 +565,8 @@ def run_check_in_requests(
 			api_user = api_user_override or account.api_user
 			if api_user:
 				headers[provider_config.api_user_key] = api_user
+			if access_token:
+				headers['Authorization'] = f'Bearer {access_token}'
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url)

@@ -1,10 +1,13 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
+import checkin
 from checkin import get_user_info
-from utils.browser import verify_browser_login
+from utils.browser import BrowserLoginResult, verify_browser_login
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 
 @pytest.mark.asyncio
@@ -44,7 +47,79 @@ async def test_verify_login_uses_provider_endpoint_and_header():
 		'url': 'https://custom.test/api/profile',
 		'apiUserKey': 'x-user-id',
 		'timeout': 1000,
+		'accessToken': None,
 	}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('token', ['private-access-token', None])
+async def test_email_login_carries_scoped_token_through_verification_and_checkin(monkeypatch, capsys, token):
+	provider = ProviderConfig('custom', 'https://custom.test')
+	account = AccountConfig(None, provider='custom', email='test@example.com', password='fake-password')
+	page = AsyncMock()
+	page.url = provider.domain + ('/dashboard' if token else '/console')
+	page.evaluate.return_value = {'status': 200, 'payload': {'success': True, 'data': {'id': 123}}}
+	context = AsyncMock()
+	context.on = MagicMock()
+	context.remove_listener = MagicMock()
+
+	async def close():
+		context.remove_listener.assert_called_once_with('response', context.on.call_args.args[1])
+
+	context.close.side_effect = close
+	context.new_page.return_value = page
+	context.cookies.return_value = [] if token else [{'name': 'session', 'value': 'fake-session'}]
+	monkeypatch.setattr(checkin, 'launch_login_context', AsyncMock(return_value=context))
+	for name in ('prepare_browser_page', 'navigate_login_page', 'save_login_screenshot'):
+		monkeypatch.setattr(checkin, name, AsyncMock())
+	for name in ('is_logged_in', 'has_session_cookie'):
+		monkeypatch.setattr(checkin, name, AsyncMock(return_value=False))
+
+	async def login(*args, **kwargs):
+		capture = context.on.call_args.args[1]
+		for path in ('/api/user/login', '/api/user/auth/refresh'):
+			await capture(
+				SimpleNamespace(
+					url=provider.domain + path,
+					status=200,
+					json=AsyncMock(return_value={'success': True, 'data': {'access_token': token}}),
+				)
+			)
+		for url, status, success in (
+			('https://other.test/api/user/login', 200, True),
+			(provider.domain + '/api/status', 200, True),
+			(provider.domain + '/api/user/login', 401, True),
+			(provider.domain + '/api/user/login', 200, False),
+		):
+			await capture(
+				SimpleNamespace(
+					url=url,
+					status=status,
+					json=AsyncMock(return_value={'success': success, 'data': {'access_token': 'untrusted-token'}}),
+				)
+			)
+
+	monkeypatch.setattr(checkin, 'login_with_email_form', login)
+	requests = []
+
+	def handle(request):
+		requests.append(request)
+		assert request.url.host == 'custom.test'
+		assert request.headers.get('authorization') == (f'Bearer {token}' if token else None)
+		assert request.headers['new-api-user'] == '123'
+		return httpx.Response(200, json={'success': True, 'data': {'id': 123, 'quota': 500000}})
+
+	client = httpx.Client
+	monkeypatch.setattr(checkin.httpx, 'Client', lambda **kwargs: client(transport=httpx.MockTransport(handle)))
+	success, before, after = await checkin.check_in_account(account, 0, AppConfig({'custom': provider}))
+	assert success and before['success'] and after['success']
+	assert [request.method for request in requests] == ['GET', 'POST', 'GET']
+	assert page.evaluate.call_args.args[1]['accessToken'] == token
+	page.goto.assert_not_awaited()
+	context.close.assert_awaited_once()
+	context.remove_listener.assert_called_once_with('response', context.on.call_args.args[1])
+	assert 'private-access-token' not in capsys.readouterr().out
+	assert 'private-access-token' not in repr(BrowserLoginResult({}, access_token='private-access-token'))
 
 
 @pytest.mark.asyncio

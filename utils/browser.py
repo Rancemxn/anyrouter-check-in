@@ -6,7 +6,7 @@ import asyncio
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -144,6 +144,7 @@ class BrowserLoginResult:
 	cookies: dict[str, str]
 	api_user: str | None = None
 	checked_in: bool | None = None
+	access_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -429,22 +430,24 @@ async def verify_browser_login(
 	*,
 	user_info_path: str = USER_SELF_API_SUFFIX,
 	api_user_key: str = 'new-api-user',
+	access_token: str | None = None,
 ) -> dict | None:
 	"""主动用浏览器会话查询用户；localStorage 仅提供请求头，认证以服务器响应为准。"""
 	target = urlsplit(console_url)
 	current = urlsplit(page.url)
 	try:
 		print(f'[INFO] Verifying browser session via {user_info_path}')
-		if (current.scheme, current.netloc) != (target.scheme, target.netloc) or not current.path.startswith(
-			CONSOLE_PATH
+		if (current.scheme, current.netloc) != (target.scheme, target.netloc) or (
+			not access_token and not current.path.startswith(CONSOLE_PATH)
 		):
 			await page.goto(console_url, wait_until='domcontentloaded', timeout=min(timeout_ms, 60_000))
 		result = await page.evaluate(
-			"""async ({url, apiUserKey, timeout}) => {
+			"""async ({url, apiUserKey, timeout, accessToken}) => {
 				if (new URL(url).origin !== location.origin) return {status: 0, hasUserId: false};
 				let user;
 				try { user = JSON.parse(localStorage.getItem('user') || 'null'); } catch {}
 				const headers = {Accept: 'application/json'};
+				if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 				const hasUserId = user?.id != null;
 				if (hasUserId) headers[apiUserKey] = String(user.id);
 				const response = await fetch(url, {
@@ -464,6 +467,7 @@ async def verify_browser_login(
 				'url': f'{target.scheme}://{target.netloc}{user_info_path}',
 				'apiUserKey': api_user_key,
 				'timeout': min(timeout_ms, SESSION_WAIT_TIMEOUT_MS),
+				'accessToken': access_token,
 			},
 		)
 	except Exception as exc:

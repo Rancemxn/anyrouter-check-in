@@ -81,6 +81,7 @@
 **字段说明**：
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
+- HappyCoding 等新版 NewAPI 的邮箱密码登录还会自动读取登录响应中的访问令牌，用于后续认证和签到；无需手动配置令牌，令牌仅保留在本次进程内。
 - `cookies`：兼容旧版的 session cookies 登录方式
 - `github_cookies`：AgentRouter 的 GitHub 浏览器会话，使用下方脚本导出；配置后优先于邮箱密码与旧 session
 - `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
