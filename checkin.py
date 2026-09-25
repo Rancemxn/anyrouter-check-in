@@ -327,6 +327,9 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
 	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
+	if response.status_code == 404 and provider_config.sign_in_path == '/api/user/sign_in':
+		print(f'[INFO] {account_name}: Legacy check-in endpoint returned 404; trying /api/user/checkin')
+		response = client.post(f'{provider_config.domain}/api/user/checkin', headers=checkin_headers, timeout=30)
 
 	print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
 
