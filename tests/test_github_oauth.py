@@ -38,6 +38,32 @@ def test_github_config_validates_session_and_identity(monkeypatch, capsys):
 	assert COOKIE['value'] not in capsys.readouterr().out
 
 
+def test_powershell_merged_accounts_keep_credentials_and_validation(monkeypatch, capsys):
+	github = {'provider': 'agentrouter', 'api_user': '123', 'github_cookies': [COOKIE]}
+	data = [
+		{'email': 'test@example.com', 'password': 'fake-password'},
+		{'Count': 1, 'value': [github]},
+		{'Count': 1, 'value': [{**github, 'api_user': '456'}]},
+	]
+	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps(data))
+	accounts = load_accounts_config()
+	assert accounts is not None and len(accounts) == 3
+	assert accounts[0].has_login_credentials()
+	assert [account.api_user for account in accounts] == [None, '123', '456']
+	assert all(account.github_cookies == [COOKIE] for account in accounts[1:])
+	assert [account.name for account in accounts] == ['Account 1', 'Account 2', 'Account 3']
+	for invalid in (
+		{'Count': 2, 'value': [github]},
+		{'Count': 1, 'value': github},
+		{'Count': 1, 'value': [None]},
+		{'Count': 1, 'value': [{**github, 'api_user': None}]},
+		{'Count': 1, 'value': [{**github, 'github_cookies': [{**COOKIE, 'domain': 'attacker.example'}]}]},
+	):
+		monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([data[0], invalid]))
+		assert load_accounts_config() is None
+	assert COOKIE['value'] not in capsys.readouterr().out
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['rewarded', 'unconfirmed', 'wrong_account', 'expired', 'callback_failed'])
 async def test_oauth_uses_fresh_state_and_scoped_cookies(monkeypatch, case):

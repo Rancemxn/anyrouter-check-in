@@ -122,6 +122,14 @@ uv run python -m scripts.export_github_session --name AgentRouter
 
 导出配置包含 `provider: "agentrouter"`、`api_user` 和 `github_cookies`。`api_user` 用来核对 OAuth 登录后的账号，避免使用错误的 GitHub 会话。多账号可分别导出，例如 `--name AgentRouter2 --output .secrets/agentrouter2.json`，再合并到同一个 Secret（总大小不得超过 GitHub 的 48 KB 限制）。
 
+在 PowerShell 中合并两个导出文件，可用 Python 直接拼接账号数组，避免 `ConvertTo-Json` 产生额外的 `Count` / `value` 包装：
+
+```powershell
+uv run python -c "import json; from pathlib import Path; files = ['.secrets/agentrouter.json', '.secrets/agentrouter2.json']; accounts = [a for f in files for a in json.loads(Path(f).read_text(encoding='utf-8-sig'))]; Path('.secrets/agentrouter-combined.json').write_text(json.dumps(accounts, ensure_ascii=False), encoding='utf-8')"
+```
+
+合并文件只包含这两个 AgentRouter 账号，更新 Secret 时仍需保留原有 AnyRouter 账号。已导入 `Count` / `value` 包装的配置也会自动展开，并继续校验每个账号的凭证。
+
 这里保存的是 **GitHub 浏览器会话**，不是一次性的 OAuth `code`，也不是 PAT / Actions 的 `GITHUB_TOKEN`。Actions 每次从 Secret 读取，OAuth 分支不会保存 Profile、截图或会话 artifact。只将 AgentRouter 域的 Cookie 传给其余额接口，GitHub Cookie 留在临时浏览器中。`.secrets/` 已被 Git 忽略，导出文件本身是本地明文，请勿提交或分享。
 
 GitHub 可能因会话过期或新环境要求再次验证；日志提示重新导出时，在本地重做以上步骤并更新 Secret。脚本不会自动修改 Secret，也不保证永久免验证。`checked_in: false` 或缺失时会显示“未确认本次奖励（可能已领取）”。

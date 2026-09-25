@@ -227,8 +227,19 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			print('ERROR: Account configuration must use array format [{}]')
 			return None
 
+		# Windows PowerShell 合并 JSON 数组时可能生成 {"value": [...], "Count": N} 包装。
+		normalized = []
+		for item in accounts_data:
+			if isinstance(item, dict) and set(item) == {'value', 'Count'}:
+				if not isinstance(item['value'], list) or item['Count'] != len(item['value']):
+					print('ERROR: Invalid PowerShell account array wrapper (value/Count)')
+					return None
+				normalized.extend(item['value'])
+			else:
+				normalized.append(item)
+
 		accounts = []
-		for i, account_dict in enumerate(accounts_data):
+		for i, account_dict in enumerate(normalized):
 			if not isinstance(account_dict, dict):
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
