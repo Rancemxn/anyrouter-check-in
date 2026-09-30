@@ -356,6 +356,8 @@ echo "新的 FONT_ARCHIVE_KEY: $KEY"
 
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
 
+GitHub Actions 已设置 `NOTIFY_ON_FAILURE_ONLY=true`：仅账号签到失败、账号配置错误或程序异常时通知；全部成功时，即使首次运行或余额变化也不通知。本地运行也可设置此环境变量；未设置时保留原有通知规则。
+
 ### 邮箱通知(STMP)
 
 - `EMAIL_USER`: 发件人邮箱地址/STMP 登录地址
@@ -363,6 +365,8 @@ echo "新的 FONT_ARCHIVE_KEY: $KEY"
 - `EMAIL_SENDER`: 邮件显示的发件人地址(可选，默认: EMAIL_USER)
 - `CUSTOM_SMTP_SERVER`: 自定义发件人 SMTP 服务器(可选)
 - `EMAIL_TO`: 收件人邮箱地址
+
+QQ 邮箱使用 `smtp.qq.com:465`（SSL），`EMAIL_PASS` 填写 QQ 邮箱的 SMTP 授权码。将上述配置保存到 `production` 环境的 Secrets 中。
 
 ### 钉钉机器人
 

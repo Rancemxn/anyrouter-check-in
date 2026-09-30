@@ -635,6 +635,7 @@ async def main():
 	current_balances = {}
 	account_check_in_details = {}
 	need_notify = False
+	has_failures = False
 	balance_changed = False
 
 	for i, account in enumerate(accounts):
@@ -647,6 +648,7 @@ async def main():
 			should_notify_this_account = False
 
 			if not success:
+				has_failures = True
 				should_notify_this_account = True
 				need_notify = True
 				account_name = account.get_display_name(i)
@@ -705,6 +707,7 @@ async def main():
 		except Exception as e:
 			account_name = account.get_display_name(i)
 			print(f'[FAILED] {account_name} processing exception: {e}')
+			has_failures = True
 			need_notify = True
 			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
 
@@ -713,11 +716,11 @@ async def main():
 		if last_balance_hash is None:
 			balance_changed = True
 			need_notify = True
-			print('[NOTIFY] First run detected, will send notification with current balances')
+			print('[INFO] First run detected')
 		elif current_balance_hash != last_balance_hash:
 			balance_changed = True
 			need_notify = True
-			print('[NOTIFY] Balance changes detected, will send notification')
+			print('[INFO] Balance changes detected')
 		else:
 			print('[INFO] No balance changes detected')
 
@@ -733,6 +736,9 @@ async def main():
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
+
+	if os.getenv('NOTIFY_ON_FAILURE_ONLY', '').strip().lower() == 'true':
+		need_notify = has_failures
 
 	if need_notify and notification_content:
 		summary = [
@@ -765,9 +771,9 @@ async def main():
 
 		print(notify_content)
 		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
-		print('[NOTIFY] Notification sent due to failures or balance changes')
+		print('[NOTIFY] Notification processing completed')
 	else:
-		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
+		print('[INFO] No notification required by current policy, notification skipped')
 
 	sys.exit(0 if success_count > 0 else 1)
 
@@ -780,7 +786,9 @@ def run_main():
 		print('\n[WARNING] Program interrupted by user')
 		sys.exit(1)
 	except Exception as e:
-		print(f'\n[FAILED] Error occurred during program execution: {e}')
+		error_msg = f'[FAILED] Error occurred during program execution: {e}'
+		print(f'\n{error_msg}')
+		notify.push_message('AnyRouter Check-in Alert', error_msg, msg_type='text')
 		sys.exit(1)
 
 

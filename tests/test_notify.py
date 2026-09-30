@@ -1,4 +1,5 @@
 import os
+import ssl
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,10 @@ def test_send_email(mock_smtp, notification_kit):
 
 	notification_kit.send_email('测试标题', '测试内容')
 
+	assert mock_smtp.call_args.args == ('smtp.example.com', 465)
+	assert mock_smtp.call_args.kwargs['timeout'] == 30
+	assert mock_smtp.call_args.kwargs['context'].verify_mode == ssl.CERT_REQUIRED
+	assert mock_smtp.call_args.kwargs['context'].check_hostname
 	assert mock_server.login.called
 	assert mock_server.send_message.called
 

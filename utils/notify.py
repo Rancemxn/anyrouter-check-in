@@ -1,5 +1,6 @@
 import os
 import smtplib
+import ssl
 from email.mime.text import MIMEText
 from typing import Any, Literal
 
@@ -71,7 +72,7 @@ class NotificationKit:
 		msg['Subject'] = title
 
 		smtp_server = self.smtp_server if self.smtp_server else f'smtp.{self.email_user.split("@")[1]}'
-		with smtplib.SMTP_SSL(smtp_server, 465) as server:
+		with smtplib.SMTP_SSL(smtp_server, 465, timeout=30, context=ssl.create_default_context()) as server:
 			server.login(self.email_user, self.email_pass)
 			server.send_message(msg)
 

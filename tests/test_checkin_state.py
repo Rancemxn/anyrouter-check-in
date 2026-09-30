@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -7,8 +8,9 @@ import pytest
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+import checkin
 from checkin import execute_check_in, generate_balance_hash
-from utils.config import ProviderConfig
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 
 @pytest.mark.parametrize(
@@ -68,3 +70,42 @@ def test_balance_hash_is_stable_for_equivalent_balances():
 	}
 
 	assert generate_balance_hash(left) == generate_balance_hash(right)
+
+
+@pytest.mark.parametrize('failure_only', [True, False])
+@pytest.mark.parametrize('result', ['success', 'partial_failure', 'all_failed', 'exception', 'invalid_config'])
+async def test_failure_notification_policy(monkeypatch, tmp_path, failure_only, result):
+	monkeypatch.setenv('NOTIFY_ON_FAILURE_ONLY', str(failure_only).lower())
+	accounts = [AccountConfig(None, name='Account 1'), AccountConfig(None, name='Account 2')]
+	monkeypatch.setattr(checkin, 'load_accounts_config', lambda: [] if result == 'invalid_config' else accounts)
+	monkeypatch.setattr(checkin.AppConfig, 'load_from_env', lambda: AppConfig({}))
+	monkeypatch.setattr(checkin, 'BALANCE_HASH_FILE', str(tmp_path / 'balance_hash.txt'))
+	monkeypatch.setattr(checkin, 'is_debug_enabled', lambda: False)
+	before = {'success': True, 'quota': 10, 'used_quota': 0, 'display': 'Before'}
+	after = {'success': True, 'quota': 35, 'used_quota': 0, 'display': 'After'}
+	failed = (False, None, {'success': False, 'error': 'Login failed'})
+	first = failed if result == 'all_failed' else (True, before, after)
+	second = RuntimeError('Login error') if result == 'exception' else failed
+	if result == 'success':
+		second = (True, None, {**after, 'check_in_status': 'rewarded'})
+	monkeypatch.setattr(checkin, 'check_in_account', AsyncMock(side_effect=[first, second]))
+	push = MagicMock()
+	monkeypatch.setattr(checkin.notify, 'push_message', push)
+	with pytest.raises(SystemExit) as exit_info:
+		await checkin.main()
+	assert exit_info.value.code == (1 if result in {'all_failed', 'invalid_config'} else 0)
+	assert push.call_count == int(not failure_only or result != 'success')
+	if push.called:
+		assert ('[FAIL' in push.call_args.args[1]) if result != 'success' else ('[CHECK-IN]' in push.call_args.args[1])
+
+
+def test_unhandled_program_error_sends_notification(monkeypatch):
+	monkeypatch.setattr(checkin, 'main', AsyncMock(side_effect=RuntimeError('Startup failed')))
+	push = MagicMock()
+	monkeypatch.setattr(checkin.notify, 'push_message', push)
+	with pytest.raises(SystemExit) as exit_info:
+		checkin.run_main()
+	assert exit_info.value.code == 1
+	push.assert_called_once_with(
+		'AnyRouter Check-in Alert', '[FAILED] Error occurred during program execution: Startup failed', msg_type='text'
+	)
