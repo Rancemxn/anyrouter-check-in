@@ -298,6 +298,7 @@ GitHub 可能因会话过期或新环境要求再次验证；日志提示重新�
 - `anyrouter`：
   - `bypass_method: "waf_cookies"`（需要先获取 WAF cookies，然后执行签到）
   - `sign_in_path: "/api/user/sign_in"`
+  - `use_proxy: true`
 - `agentrouter`：
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
   - `sign_in_path: null`（GitHub OAuth 登录回调确认签到；旧 Cookie 配置只查询余额）
@@ -310,17 +311,22 @@ GitHub 可能因会话过期或新环境要求再次验证；日志提示重新�
 
 ## 代理配置（可选）
 
-内置的 `agentrouter` 默认 `use_proxy: true`。如果你的运行环境访问该平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
+内置的 `anyrouter` 和 `agentrouter` 均默认 `use_proxy: true`，浏览器登录、WAF Cookie 获取及签到请求都会使用已配置的代理。如果你的运行环境访问这些平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理，无需额外设置 `PROVIDERS`。
 
 在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
 
 - `PROXY_SUBSCRIPTION_URL`：Clash/Mihomo 订阅链接。设置后，workflow 会运行 `scripts/setup_mihomo_proxy.sh`，启动本地代理并写入 `CHECKIN_PROXY_URL`。
 
-本地运行时也可以直接使用已有代理：
+本地运行时也可以在 `.env` 中配置已有代理：
 
 ```bash
 CHECKIN_PROXY_URL=http://127.0.0.1:7890
-PROVIDERS={"agentrouter":{"use_proxy":true}}
+```
+
+未配置代理时仍按原有方式直连。如需单独让 Anyrouter 直连，可以在 `PROVIDERS` 中显式关闭它的代理（本地 `.env` 示例）：
+
+```dotenv
+PROVIDERS={"anyrouter":{"domain":"https://anyrouter.top","use_proxy":false}}
 ```
 
 订阅脚本启动本地 mihomo 后，签到程序会并发筛选节点：GitHub OAuth 账号同时测试 GitHub 和服务商登录页，其他账号测试服务商登录页。筛选通过后按延迟排序，再通过本地代理验证真实 HTTP 请求。

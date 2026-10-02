@@ -117,7 +117,7 @@ class AppConfig:
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
-				use_proxy=False,
+				use_proxy=True,
 				persist_profile=True,
 			),
 			'agentrouter': ProviderConfig(
