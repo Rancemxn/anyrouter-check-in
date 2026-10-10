@@ -145,6 +145,7 @@ class BrowserLoginResult:
 	api_user: str | None = None
 	checked_in: bool | None = None
 	access_token: str | None = field(default=None, repr=False)
+	created_session_id: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -748,7 +749,7 @@ async def fill_email_credentials(page: Page, email: str, password: str, timeout_
 	await _set_input_value(password_input, password, action_timeout)
 
 
-async def submit_login_form(page: Page, timeout_ms: int) -> None:
+async def submit_login_form(page: Page, timeout_ms: int, *, login_response_event: asyncio.Event | None = None) -> None:
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	submit = await _first_visible_locator(page, SUBMIT_SELECTORS)
 	if not submit:
@@ -767,6 +768,12 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 	except Exception:
 		await submit.click(force=True, timeout=action_timeout)
 	await _wait_for_optional_load_state(page, 'domcontentloaded', action_timeout)
+	if login_response_event is not None:
+		try:
+			await asyncio.wait_for(login_response_event.wait(), timeout=SESSION_WAIT_TIMEOUT_MS / 1000)
+		except TimeoutError:
+			print('[WARN] No login response received before timeout')
+		return
 	await _wait_for_optional_load_state(page, 'networkidle', min(timeout_ms, 30_000))
 	await wait_for_logged_in(page, SESSION_WAIT_TIMEOUT_MS)
 
@@ -779,6 +786,7 @@ async def login_with_email_form(
 	*,
 	provider: str = '',
 	account_name: str = '',
+	login_response_event: asyncio.Event | None = None,
 ) -> None:
 	await _open_email_login_form(
 		page,
@@ -787,4 +795,4 @@ async def login_with_email_form(
 		account_name=account_name,
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
-	await submit_login_form(page, timeout_ms)
+	await submit_login_form(page, timeout_ms, login_response_event=login_response_event)

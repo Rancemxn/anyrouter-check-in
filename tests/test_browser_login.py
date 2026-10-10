@@ -52,8 +52,18 @@ async def test_verify_login_uses_provider_endpoint_and_header():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('token', ['private-access-token', None])
-async def test_email_login_carries_scoped_token_through_verification_and_checkin(monkeypatch, capsys, token):
+@pytest.mark.parametrize(
+	'token, session_id, logout_status',
+	[
+		('private-access-token', 'private-session-id', 200),
+		('private-access-token', 'private-session-id', 500),
+		('private-access-token', None, 200),
+		(None, None, 200),
+	],
+)
+async def test_email_login_carries_scoped_token_through_verification_and_checkin(
+	monkeypatch, capsys, token, session_id, logout_status
+):
 	provider = ProviderConfig('custom', 'https://custom.test')
 	account = AccountConfig(None, provider='custom', email='test@example.com', password='fake-password')
 	page = AsyncMock()
@@ -82,7 +92,9 @@ async def test_email_login_carries_scoped_token_through_verification_and_checkin
 				SimpleNamespace(
 					url=provider.domain + path,
 					status=200,
-					json=AsyncMock(return_value={'success': True, 'data': {'access_token': token}}),
+					json=AsyncMock(
+						return_value={'success': True, 'data': {'access_token': token, 'session': {'sid': session_id}}}
+					),
 				)
 			)
 		for url, status, success in (
@@ -106,6 +118,9 @@ async def test_email_login_carries_scoped_token_through_verification_and_checkin
 		requests.append(request)
 		assert request.url.host == 'custom.test'
 		assert request.headers.get('authorization') == (f'Bearer {token}' if token else None)
+		if request.method == 'DELETE':
+			assert request.url.path == f'/api/user/sessions/{session_id}'
+			return httpx.Response(logout_status, json={'success': logout_status == 200})
 		assert request.headers['new-api-user'] == '123'
 		return httpx.Response(200, json={'success': True, 'data': {'id': 123, 'quota': 500000}})
 
@@ -113,13 +128,18 @@ async def test_email_login_carries_scoped_token_through_verification_and_checkin
 	monkeypatch.setattr(checkin.httpx, 'Client', lambda **kwargs: client(transport=httpx.MockTransport(handle)))
 	success, before, after = await checkin.check_in_account(account, 0, AppConfig({'custom': provider}))
 	assert success and before['success'] and after['success']
-	assert [request.method for request in requests] == ['GET', 'POST', 'GET']
+	assert [request.method for request in requests] == ['GET', 'POST', 'GET'] + (['DELETE'] if session_id else [])
 	assert page.evaluate.call_args.args[1]['accessToken'] == token
 	page.goto.assert_not_awaited()
 	context.close.assert_awaited_once()
 	context.remove_listener.assert_called_once_with('response', context.on.call_args.args[1])
-	assert 'private-access-token' not in capsys.readouterr().out
-	assert 'private-access-token' not in repr(BrowserLoginResult({}, access_token='private-access-token'))
+	output = capsys.readouterr().out
+	result_repr = repr(BrowserLoginResult({}, access_token=token, created_session_id=session_id))
+	for secret in ('private-access-token', 'private-session-id'):
+		assert secret not in output
+		assert secret not in result_repr
+	if session_id:
+		assert ('Released this run' if logout_status == 200 else 'Could not release this run') in output
 
 
 @pytest.mark.asyncio
