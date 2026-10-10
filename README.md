@@ -82,6 +82,8 @@
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
 - HappyCoding 等新版 NewAPI 的邮箱密码登录还会自动读取登录响应中的访问令牌，用于后续认证和签到；无需手动配置令牌，令牌仅保留在本次进程内。
+- 新版 NewAPI 每次密码登录会创建服务器会话。脚本完成签到后会释放本次新建的会话，登录后的验证失败时也会尝试清理，避免定时运行逐渐占满会话上限。
+- 若出现 `AUTH_SESSION_LIMIT`，请在仍已登录的设备上打开“登录会话”，执行“退出其他会话”后重试。没有已登录设备时，可通过网站的密码重置流程清理旧会话，再同步更新账号配置。`AUTH_SESSION_ISSUANCE_LIMIT` 则需要等待服务端计数窗口结束；这两类错误会直接说明原因并停止换代理重试。
 - 旧签到路径 `/api/user/sign_in` 返回 `404` 时，会自动尝试新版 NewAPI 的 `/api/user/checkin`，现有 Secret 无需修改；也可通过 `sign_in_path` 直接指定新路径。
 - `cookies`：兼容旧版的 session cookies 登录方式
 - `github_cookies`：AgentRouter 的 GitHub 浏览器会话，使用下方脚本导出；配置后优先于邮箱密码与旧 session

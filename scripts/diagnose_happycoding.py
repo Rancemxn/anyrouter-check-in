@@ -103,10 +103,10 @@ async def main():
 
 	checkin.launch_login_context = launch
 	checkin.verify_browser_login = verify
-	result = await checkin.login_with_credentials(
-		'HappyCoding', provider, account.provider, account.email, account.password
-	)
-	report('result', verified=bool(result))
+	result = await checkin.check_in_account(account, 0, AppConfig({account.provider: provider}))
+	report('result', successful=result[0])
+	if not result[0]:
+		raise SystemExit(1)
 
 
 if __name__ == '__main__':

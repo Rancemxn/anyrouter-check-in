@@ -38,6 +38,7 @@ from utils.browser import (
 from utils.config import AccountConfig, AppConfig, load_accounts_config, validate_github_cookies
 from utils.debug import debug_print, is_debug_enabled
 from utils.github_oauth import GitHubLoginRequired, login_with_github
+from utils.newapi import NewAPILoginLimitError, login_limit_error, revoke_newapi_session
 from utils.notify import notify
 from utils.proxy import activate_proxy, get_playwright_proxy, get_proxy_server, proxy_candidates
 
@@ -179,9 +180,13 @@ async def login_with_credentials(
 
 	page = None
 	access_token = None
+	created_session_id = None
+	login_completed = False
+	login_error = None
+	login_response_event = asyncio.Event()
 
 	async def capture_access_token(response):
-		nonlocal access_token
+		nonlocal access_token, created_session_id, login_error
 		# 新版 NewAPI 使用短期 Bearer Token；仅接收本站登录/刷新接口的成功响应。
 		source, target = urlsplit(response.url), urlsplit(provider_config.domain)
 		if (source.scheme, source.netloc) != (target.scheme, target.netloc) or source.path not in {
@@ -189,16 +194,29 @@ async def login_with_credentials(
 			'/api/user/auth/refresh',
 		}:
 			return
-		if response.status != 200:
-			return
 		try:
 			payload = await response.json()
 		except Exception:
-			return
-		if isinstance(payload, dict) and payload.get('success') is True and isinstance(payload.get('data'), dict):
+			payload = None
+		if (
+			response.status == 200
+			and isinstance(payload, dict)
+			and payload.get('success') is True
+			and isinstance(payload.get('data'), dict)
+		):
 			token = payload['data'].get('access_token')
 			if isinstance(token, str) and token:
 				access_token = token
+				if source.path == '/api/user/login':
+					session = payload['data'].get('session')
+					sid = session.get('sid') if isinstance(session, dict) else None
+					if isinstance(sid, str) and sid:
+						created_session_id = sid
+		if source.path == '/api/user/login':
+			login_error = login_limit_error(payload)
+			if response.status != 200 or not isinstance(payload, dict) or payload.get('success') is not True:
+				print(f'[WARN] {account_name}: Login request was rejected (HTTP {response.status})')
+			login_response_event.set()
 
 	context.on('response', capture_access_token)
 	try:
@@ -223,9 +241,12 @@ async def login_with_credentials(
 				timeout_ms,
 				provider=provider_name,
 				account_name=account_name,
+				login_response_event=login_response_event,
 			)
 		else:
 			print(f'[INFO] {account_name}: Browser profile already logged in')
+		if login_error:
+			raise login_error
 
 		console_url = f'{provider_config.domain}/console'
 		user_profile = await verify_browser_login(
@@ -260,8 +281,13 @@ async def login_with_credentials(
 		if is_debug_enabled() and api_user:
 			success_msg += f', api_user={api_user}'
 		print(success_msg)
-		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, access_token=access_token)
+		login_completed = True
+		return BrowserLoginResult(
+			cookies=all_cookies, api_user=api_user, access_token=access_token, created_session_id=created_session_id
+		)
 
+	except NewAPILoginLimitError:
+		raise
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error during login: {e}')
 		if page is not None:
@@ -269,6 +295,16 @@ async def login_with_credentials(
 		return None
 	finally:
 		context.remove_listener('response', capture_access_token)
+		if created_session_id and access_token and not login_completed:
+			released = await asyncio.to_thread(
+				revoke_newapi_session,
+				provider_config.domain,
+				access_token,
+				created_session_id,
+				proxy_url=get_proxy_server(use_proxy=provider_config.use_proxy),
+			)
+			if not released:
+				print(f'[WARN] {account_name}: Could not release the new login session after verification failed')
 		await context.close()
 
 
@@ -432,7 +468,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 				continue
 		try:
 			result = await _check_in_account_once(account, account_index, app_config)
-		except GitHubLoginRequired as exc:
+		except (GitHubLoginRequired, NewAPILoginLimitError) as exc:
 			print(f'[FAILED] {exc}')
 			return False, None, {'success': False, 'error': str(exc)}
 		if result[0]:
@@ -483,6 +519,7 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 	all_cookies = None
 	resolved_api_user: str | None = None
 	access_token = None
+	created_session_id = None
 	auth_method = None
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
@@ -498,6 +535,7 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
 			access_token = login_result.access_token
+			created_session_id = login_result.created_session_id
 			auth_method = 'email/password'
 		else:
 			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
@@ -523,6 +561,7 @@ async def _check_in_account_once(account: AccountConfig, account_index: int, app
 		api_user_override=resolved_api_user,
 		use_proxy=provider_config.use_proxy,
 		access_token=access_token,
+		created_session_id=created_session_id,
 	)
 
 
@@ -535,6 +574,7 @@ def run_check_in_requests(
 	api_user_override: str | None = None,
 	use_proxy: bool = False,
 	access_token: str | None = None,
+	created_session_id: str | None = None,
 ) -> tuple[bool, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
@@ -595,6 +635,18 @@ def run_check_in_requests(
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return False, None, None
+	finally:
+		if created_session_id and access_token:
+			released = revoke_newapi_session(
+				provider_config.domain,
+				access_token,
+				created_session_id,
+				proxy_url=get_proxy_server(use_proxy=use_proxy),
+			)
+			if released:
+				print(f"[INFO] {account_name}: Released this run's NewAPI login session")
+			else:
+				print(f"[WARN] {account_name}: Could not release this run's NewAPI login session")
 
 
 async def main():
