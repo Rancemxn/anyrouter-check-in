@@ -1,21 +1,162 @@
-name: AgentRouter 会话恢复准备
+name: AgentRouter 会话恢复验证
 permissions:
   contents: read
+concurrency:
+  group: checkin-${{ github.ref }}
+  cancel-in-progress: false
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: 开启调试模式（截图 artifact、详细日志）
+        required: false
+        default: false
+        type: boolean
+
 jobs:
-  seal-existing-config:
+  checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 45
     environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: 1
+      DEBUG_MODE: 'false'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-      - name: Install encryption dependency
-        run: python -m pip install cryptography==46.0.3
-      - name: Seal existing configuration
-        env:
-          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-        run: python scripts/seal_account_config.py
+    - uses: actions/checkout@v7
+
+    - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+      with:
+        version: "latest"
+
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: 缓存 UV 依赖
+      uses: actions/cache@v6
+      id: uv-cache
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-
+
+    - name: 安装依赖
+      run: |
+        uv sync --frozen
+        echo "✅ 环境初始化完成"
+
+    - name: 安装系统依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+          fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+
+    - name: 安装 Windows 字体
+      env:
+        FONT_ARCHIVE_KEY: ${{ secrets.FONT_ARCHIVE_KEY }}
+      run: |
+        if [ -z "$FONT_ARCHIVE_KEY" ]; then
+          echo "::warning::FONT_ARCHIVE_KEY 未配置，跳过 Windows 字体安装"
+          exit 0
+        fi
+        mkdir -p ~/.local/share/fonts/windows
+        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+          -in assets/fonts/windows-fonts.tar.gz.enc \
+          -pass env:FONT_ARCHIVE_KEY | tar xz -C ~/.local/share/fonts/windows
+        fc-cache -f > /dev/null
+        # 与 cloakbrowser 内部判定一致：fc-list 小写输出做子串匹配
+        listing=$(fc-list | tr 'A-Z' 'a-z')
+        missing=0
+        for font in "Segoe UI" "Segoe UI Light" "Calibri" "Marlett" "MS UI Gothic" "Franklin Gothic" "Consolas" "Courier New"; do
+          if printf '%s' "$listing" | grep -qF "$(printf '%s' "$font" | tr 'A-Z' 'a-z')"; then
+            echo "  ✓ $font"
+          else
+            echo "  ✗ $font"
+            missing=$((missing + 1))
+          fi
+        done
+        if [ "$missing" -ne 0 ]; then
+          echo "::error::$missing 个 Windows 字体未注册，cloakbrowser 的 Windows 伪装会降级"
+          exit 1
+        fi
+        echo "✅ Windows 字体 8/8 就位"
+
+    - name: 缓存 CloakBrowser 二进制
+      uses: actions/cache@v6
+      id: cloakbrowser-cache
+      with:
+        path: ~/.cloakbrowser
+        key: ${{ runner.os }}-cloakbrowser-v1
+        restore-keys: |
+          ${{ runner.os }}-cloakbrowser-
+
+    - name: 安装 CloakBrowser
+      run: |
+        uv run python -m cloakbrowser install
+        echo "✅ CloakBrowser 安装完成"
+
+    - name: 恢复余额历史缓存
+      uses: actions/cache@v6
+      with:
+        path: balance_hash.txt
+        key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
+        restore-keys: |
+          balance-hash-${{ github.ref_name }}-
+          balance-hash-
+
+    - name: 恢复浏览器 Profile 缓存
+      uses: actions/cache@v6
+      with:
+        path: .browser_profiles
+        key: browser-profiles-${{ runner.os }}-v1
+        restore-keys: |
+          browser-profiles-${{ runner.os }}-
+
+    - name: 配置代理
+      env:
+        PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+        MIHOMO_VERSION: v1.19.27
+        PROXY_REQUIRED: false
+      run: bash scripts/setup_mihomo_proxy.sh
+
+    - name: 执行签到
+      env:
+        DEBUG_MODE: ${{ env.DEBUG_MODE }}
+        CHECKIN_HEADLESS: false
+        CHECKIN_HUMANIZE: true
+        CHECKIN_WAIT_TIMEOUT_MS: 120000
+        CHECKIN_PROXY_ATTEMPTS: 3
+        NOTIFY_ON_FAILURE_ONLY: 'true'
+        ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+        PROVIDERS: ${{ secrets.PROVIDERS }}
+      run: |
+        xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run python -m scripts.verify_agentrouter_sessions
+
+    - name: 上传调试截图
+      if: always() && env.DEBUG_MODE == 'true'
+      env:
+        HTTP_PROXY: ''
+        HTTPS_PROXY: ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: checkin-screenshots-${{ github.run_id }}
+        path: checkin_screenshots/
+        if-no-files-found: warn
+        include-hidden-files: true
+        retention-days: 14
+
+    - name: 停止代理
+      if: always()
+      run: bash scripts/stop_mihomo_proxy.sh
+
+    - name: 执行结果
+      if: always()
+      run: |
+        echo "签到任务执行完成"
+        echo "时间: $(date)"
+        if [ "${DEBUG_MODE}" = "true" ] && [ -d checkin_screenshots ] && [ "$(ls -A checkin_screenshots 2>/dev/null)" ]; then
+          echo "调试截图已上传为 artifact: checkin-screenshots-${{ github.run_id }}"
+          ls -la checkin_screenshots/
+        fi
