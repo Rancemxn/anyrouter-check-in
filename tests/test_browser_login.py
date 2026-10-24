@@ -11,6 +11,27 @@ from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('has_terms', [True, False])
+async def test_email_login_accepts_only_the_login_consent_before_submit(monkeypatch, has_terms):
+	from utils import browser
+
+	page = MagicMock()
+	consent = AsyncMock()
+	consent.is_visible.return_value = has_terms
+	page.locator.return_value.first = consent
+	for name in ('_open_email_login_form', 'fill_email_credentials'):
+		monkeypatch.setattr(browser, name, AsyncMock())
+
+	async def submit(*args, **kwargs):
+		assert consent.check.await_count == int(has_terms)
+		consent.click.assert_not_awaited()  # check 保留已勾选状态，click 会反选。
+		page.locator.assert_called_once_with('.cursor-auth-consent [role="checkbox"]')
+
+	monkeypatch.setattr(browser, 'submit_login_form', submit)
+	await browser.login_with_email_form(page, 'test@example.com', 'fake-password', 1000)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
 	'status, payload, valid',
 	[

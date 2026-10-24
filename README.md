@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router 与 Orbitix，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、Orbitix 与 Hyxware，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -81,7 +81,7 @@
 **字段说明**：
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
-- HappyCoding、Orbitix 等新版 NewAPI 的邮箱密码登录还会自动读取登录响应中的访问令牌，用于后续认证和签到；无需手动配置令牌，令牌仅保留在本次进程内。
+- HappyCoding、Orbitix、Hyxware 等新版 NewAPI 的邮箱密码登录还会自动读取登录响应中的访问令牌，用于后续认证和签到；无需手动配置令牌，令牌仅保留在本次进程内。
 - 新版 NewAPI 每次密码登录会创建服务器会话。脚本完成签到后会释放本次新建的会话，登录后的验证失败时也会尝试清理，避免定时运行逐渐占满会话上限。
 - 若出现 `AUTH_SESSION_LIMIT`，请在仍已登录的设备上打开“登录会话”，执行“退出其他会话”后重试。没有已登录设备时，可通过网站的密码重置流程清理旧会话，再同步更新账号配置。`AUTH_SESSION_ISSUANCE_LIMIT` 则需要等待服务端计数窗口结束；这两类错误会直接说明原因并停止换代理重试。
 - 旧签到路径 `/api/user/sign_in` 返回 `404` 时，会自动尝试新版 NewAPI 的 `/api/user/checkin`，现有 Secret 无需修改；也可通过 `sign_in_path` 直接指定新路径。
@@ -95,9 +95,11 @@
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- `anyrouter`、`agentrouter` 与 `orbitix` 配置已内置，无需填写
+- `anyrouter`、`agentrouter`、`orbitix` 与 `hyxware` 配置已内置，无需填写
 
 Orbitix 账号填写 `provider: "orbitix"`、`email`（网站用户名或邮箱）和 `password` 即可。默认通过代理访问 `https://new.orbitix.site`，使用临时浏览器，签到后释放本次密码登录创建的服务器会话。
+
+Hyxware 账号填写 `provider: "hyxware"`、`email`（网站用户名或邮箱）和 `password` 即可。默认通过代理访问 `https://hyxware.com`，使用临时浏览器，签到后释放本次密码登录创建的服务器会话，保留其他设备的会话。
 
 如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
 
@@ -224,7 +226,7 @@ GitHub 可能因会话过期或新环境要求再次验证；日志提示重新�
 
 ## 自定义 Provider 配置（可选）
 
-默认情况下，`anyrouter`、`agentrouter`、`orbitix` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
+默认情况下，`anyrouter`、`agentrouter`、`orbitix`、`hyxware` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
 
 ### 基础配置（仅域名）
 
@@ -261,7 +263,7 @@ GitHub 可能因会话过期或新环境要求再次验证；日志提示重新�
 - 不设置或设置为 `null`：直接使用用户提供的 cookies 进行请求（适合无 WAF 保护的网站）
 - 设置为 `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再进行请求（适合有 WAF 保护的网站）
 
-> 注：`anyrouter`、`agentrouter`、`orbitix` 已内置默认配置，无需在 `PROVIDERS` 中配置
+> 注：`anyrouter`、`agentrouter`、`orbitix`、`hyxware` 已内置默认配置，无需在 `PROVIDERS` 中配置
 
 ### 在 GitHub Actions 中配置
 
@@ -312,15 +314,21 @@ GitHub 可能因会话过期或新环境要求再次验证；日志提示重新�
   - `sign_in_path: "/api/user/checkin"`
   - `use_proxy: true`
   - `persist_profile: false`（临时浏览器；签到后清理本次登录创建的服务器会话）
+- `hyxware`：
+  - `domain: "https://hyxware.com"`
+  - `login_path: "/auth"`
+  - `sign_in_path: "/api/user/checkin"`
+  - `use_proxy: true`
+  - `persist_profile: false`（临时浏览器；签到后清理本次登录创建的服务器会话）
 
 **重要提示**：
 
-- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`orbitix`
+- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`orbitix`、`hyxware`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
 ## 代理配置（可选）
 
-内置的 `anyrouter`、`agentrouter`、`orbitix` 均默认 `use_proxy: true`，浏览器登录、WAF Cookie 获取及签到请求都会使用已配置的代理。如果你的运行环境访问这些平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理，无需额外设置 `PROVIDERS`。
+内置的 `anyrouter`、`agentrouter`、`orbitix`、`hyxware` 均默认 `use_proxy: true`，浏览器登录、WAF Cookie 获取及签到请求都会使用已配置的代理。如果你的运行环境访问这些平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理，无需额外设置 `PROVIDERS`。
 
 在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
 

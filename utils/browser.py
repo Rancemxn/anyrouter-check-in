@@ -37,11 +37,18 @@ LOGIN_PAGE_READY_SELECTORS = (
 	'button:has(.semi-icon-mail)',
 )
 LOGIN_FORM_SELECTOR = 'form.semi-form'
-USERNAME_SELECTORS = ('#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]')
+USERNAME_SELECTORS = (
+	'#username',
+	'input[name="username"]',
+	'input[name="email"]',
+	'input[type="email"]',
+	'input[autocomplete="username"]',
+)
 PASSWORD_SELECTORS = ('#password', 'input[name="password"]', 'input[type="password"]')  # nosec B105
 SUBMIT_SELECTORS = (
 	f'{LOGIN_FORM_SELECTOR} button[type="submit"]',
 	'button[type="submit"]',
+	'form button:not([type])',
 )
 SESSION_COOKIE_NAME = 'session'
 USER_SELF_API_SUFFIX = '/api/user/self'
@@ -106,7 +113,7 @@ _OPEN_EMAIL_FORM_JS = """() => {
 
 	const inDialog = (el) => !!el?.closest('[role="dialog"][aria-modal="true"], .semi-modal-content[role="dialog"]');
 
-	const usernameSelectors = ['#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]'];
+	const usernameSelectors = ['#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]'];
 	const findUsername = () => {
 		for (const selector of usernameSelectors) {
 			const el = document.querySelector(selector);
@@ -795,4 +802,7 @@ async def login_with_email_form(
 		account_name=account_name,
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
+	consent = page.locator('.cursor-auth-consent [role="checkbox"]').first
+	if await consent.is_visible():
+		await consent.check(timeout=min(timeout_ms, FORM_ACTION_TIMEOUT_MS))
 	await submit_login_form(page, timeout_ms, login_response_event=login_response_event)

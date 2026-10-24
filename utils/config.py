@@ -139,6 +139,14 @@ class AppConfig:
 				use_proxy=True,
 				persist_profile=False,
 			),
+			'hyxware': ProviderConfig(
+				name='hyxware',
+				domain='https://hyxware.com',
+				login_path='/auth',
+				sign_in_path='/api/user/checkin',
+				use_proxy=True,
+				persist_profile=False,
+			),
 		}
 
 		# 尝试从环境变量加载自定义 providers
