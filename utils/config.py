@@ -132,6 +132,13 @@ class AppConfig:
 				use_proxy=True,
 				persist_profile=False,
 			),
+			'orbitix': ProviderConfig(
+				name='orbitix',
+				domain='https://new.orbitix.site',
+				sign_in_path='/api/user/checkin',
+				use_proxy=True,
+				persist_profile=False,
+			),
 		}
 
 		# 尝试从环境变量加载自定义 providers
