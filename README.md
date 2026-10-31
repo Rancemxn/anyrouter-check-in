@@ -522,6 +522,14 @@ uv run bandit -r . -c pyproject.toml
 uv run pytest tests/ --cov=.
 ```
 
+## AWS 自托管 Runner
+
+原来的 `AnyRouter 自动签到` 保留 GitHub 托管 runner 和每 6 小时的定时任务。新增 `AnyRouter AWS 签到`，同样每 6 小时执行，与原任务错开 30 分钟；两者共用签到步骤和 `production` Secrets，并通过同一并发锁避免同时登录账号。
+
+手动执行原工作流时，`runner` 可选择 `ubuntu-latest` 或 `aws-main`。AWS 工作流及 `aws-main` 选项只允许此仓库的 `main` 分支；PR 检查继续使用 GitHub 托管 runner。自托管镜像须提前安装 Xvfb、Chromium 系统依赖和 Linux 字体，任务运行时不需要 sudo。
+
+AWS runner 使用独立容器、独立持久卷和资源限制，不挂载宿主机目录或 Docker socket，并禁止访问宿主机、内网及 AWS 元数据。公开仓库应把外部贡献者的工作流审批策略设为 `all_external_contributors`。浏览器 Profile 可能包含登录凭证，因此不上传到 GitHub Actions 缓存；有持久化需求时只保留在 runner 的私有磁盘。两种 runner 的依赖和余额缓存分别命名，避免互相覆盖。
+
 ## 免责声明
 
 本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.

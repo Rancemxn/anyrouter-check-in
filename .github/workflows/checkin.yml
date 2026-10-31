@@ -9,23 +9,44 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
+      runner:
+        description: 执行位置（AWS 仅允许 main 分支）
+        required: false
+        default: ubuntu-latest
+        type: choice
+        options:
+          - ubuntu-latest
+          - aws-main
       debug:
         description: 开启调试模式（截图 artifact、详细日志）
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      runner:
+        required: false
+        default: ubuntu-latest
+        type: string
+      debug:
         required: false
         default: false
         type: boolean
 
 jobs:
   checkin:
-    runs-on: ubuntu-latest
+    if: inputs.runner == '' || inputs.runner == 'ubuntu-latest' || (inputs.runner == 'aws-main' && github.repository == 'Rancemxn/anyrouter-check-in' && github.ref == 'refs/heads/main')
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 45
     environment: production
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: 1
-      DEBUG_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' && 'true' || 'false' }}
+      DEBUG_MODE: ${{ inputs.debug && 'true' || 'false' }}
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
       with:
@@ -40,9 +61,9 @@ jobs:
       id: uv-cache
       with:
         path: ~/.cache/uv
-        key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        key: ${{ runner.os }}-${{ runner.environment }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
         restore-keys: |
-          ${{ runner.os }}-uv-
+          ${{ runner.os }}-${{ runner.environment }}-uv-
 
     - name: 安装依赖
       run: |
@@ -50,6 +71,7 @@ jobs:
         echo "✅ 环境初始化完成"
 
     - name: 安装系统依赖
+      if: runner.environment != 'self-hosted'
       run: |
         sudo apt-get update
         sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
@@ -90,9 +112,9 @@ jobs:
       id: cloakbrowser-cache
       with:
         path: ~/.cloakbrowser
-        key: ${{ runner.os }}-cloakbrowser-v1
+        key: ${{ runner.os }}-${{ runner.environment }}-cloakbrowser-v1
         restore-keys: |
-          ${{ runner.os }}-cloakbrowser-
+          ${{ runner.os }}-${{ runner.environment }}-cloakbrowser-
 
     - name: 安装 CloakBrowser
       run: |
@@ -103,18 +125,9 @@ jobs:
       uses: actions/cache@v6
       with:
         path: balance_hash.txt
-        key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
+        key: balance-hash-${{ runner.environment }}-${{ github.ref_name }}-${{ github.run_id }}
         restore-keys: |
-          balance-hash-${{ github.ref_name }}-
-          balance-hash-
-
-    - name: 恢复浏览器 Profile 缓存
-      uses: actions/cache@v6
-      with:
-        path: .browser_profiles
-        key: browser-profiles-${{ runner.os }}-v1
-        restore-keys: |
-          browser-profiles-${{ runner.os }}-
+          balance-hash-${{ runner.environment }}-${{ github.ref_name }}-
 
     - name: 配置代理
       env:
