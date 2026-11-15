@@ -68,6 +68,25 @@ def test_send_email(mock_smtp, notification_kit):
 	assert mock_smtp.call_args.kwargs['context'].check_hostname
 	assert mock_server.login.called
 	assert mock_server.send_message.called
+	message = mock_server.send_message.call_args.args[0]
+	assert message.get_content_type() == 'multipart/alternative'
+	plain, html = message.get_payload()
+	assert plain.get_content_type() == 'text/plain'
+	assert plain.get_payload(decode=True).decode('utf-8') == '测试内容'
+	assert html.get_content_type() == 'text/html'
+	assert '测试标题' in html.get_payload(decode=True).decode('utf-8')
+
+
+@patch('smtplib.SMTP_SSL')
+def test_email_preserves_explicit_html_and_escapes_plain_text(mock_smtp, notification_kit):
+	server = mock_smtp.return_value.__enter__.return_value
+	notification_kit.send_email('Report <test>', '<script>unsafe()</script>\nNext line')
+	html = server.send_message.call_args.args[0].get_payload()[1].get_payload(decode=True).decode('utf-8')
+	assert '<script>' not in html and '&lt;script&gt;' in html and '<br>Next line' in html
+	notification_kit.send_email('HTML', '<b>Original</b>', 'html')
+	message = server.send_message.call_args.args[0]
+	assert message.get_content_type() == 'text/html'
+	assert message.get_payload(decode=True).decode('utf-8') == '<b>Original</b>'
 
 
 def test_send_pushplus(mock_httpx_client, notification_kit):
@@ -180,7 +199,11 @@ def test_push_message(notification_kit, monkeypatch):
 		mocks[method_name] = method_mock
 		monkeypatch.setattr(notification_kit, method_name, method_mock)
 
-	notification_kit.push_message('测试标题', '测试内容')
+	notification_kit.push_message('测试标题', '测试内容', email_html='<h1>邮件专用</h1>')
 
 	for method_mock in mocks.values():
 		assert method_mock.called
+	mocks['send_email'].assert_called_once_with('测试标题', '测试内容', 'text', html_content='<h1>邮件专用</h1>')
+	for method_name, method_mock in mocks.items():
+		if method_name != 'send_email':
+			method_mock.assert_called_once_with('测试标题', '测试内容')

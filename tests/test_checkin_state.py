@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,3 +110,47 @@ def test_unhandled_program_error_sends_notification(monkeypatch):
 	push.assert_called_once_with(
 		'AnyRouter Check-in Alert', '[FAILED] Error occurred during program execution: Startup failed', msg_type='text'
 	)
+
+
+@pytest.mark.parametrize('seconds_left', [7 * 86400 + 1, 7 * 86400, 0, -1])
+@pytest.mark.parametrize('login_raises', [True, False])
+async def test_expiry_reminder_overrides_failure_only_policy(monkeypatch, seconds_left, login_raises):
+	now = datetime(2026, 11, 15, 16, tzinfo=checkin.BEIJING)
+
+	class FrozenDateTime(datetime):
+		@classmethod
+		def now(cls, tz=None):
+			return now.astimezone(tz)
+
+	monkeypatch.setattr(checkin, 'datetime', FrozenDateTime)
+	monkeypatch.setenv('NOTIFY_ON_FAILURE_ONLY', 'true')
+	account = AccountConfig(
+		None,
+		name='AgentRouter',
+		provider='agentrouter',
+		github_cookies=[
+			{'name': 'user_session', 'domain': 'github.com', 'path': '/', 'expires': now.timestamp() + seconds_left}
+		],
+	)
+	monkeypatch.setattr(checkin, 'load_accounts_config', lambda: [account])
+	monkeypatch.setattr(checkin.AppConfig, 'load_from_env', lambda: AppConfig({}))
+	monkeypatch.setattr(checkin, 'load_balance_hash', lambda: None)
+	monkeypatch.setattr(checkin, 'save_balance_hash', MagicMock())
+	monkeypatch.setattr(checkin, 'is_debug_enabled', lambda: False)
+	after = {'success': True, 'quota': 35, 'used_quota': 0, 'check_in_status': 'rewarded', 'display': 'Balance'}
+	login = (
+		AsyncMock(side_effect=RuntimeError('Connection failed'))
+		if login_raises
+		else AsyncMock(return_value=(True, None, after))
+	)
+	monkeypatch.setattr(checkin, 'check_in_account', login)
+	push = MagicMock()
+	monkeypatch.setattr(checkin.notify, 'push_message', push)
+	with pytest.raises(SystemExit):
+		await checkin.main()
+	near = seconds_left <= 7 * 86400
+	assert push.call_count == int(near or login_raises)
+	if push.called:
+		assert ('[EXPIRY] AgentRouter' in push.call_args.args[1]) is near
+		assert ('GitHub' in push.call_args.kwargs['email_html']) is near
+		assert '北京时间' in push.call_args.kwargs['email_html']

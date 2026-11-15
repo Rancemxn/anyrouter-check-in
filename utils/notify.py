@@ -1,10 +1,13 @@
 import os
 import smtplib
 import ssl
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Literal
 
 import httpx
+
+from utils.email_report import render_notice_email
 
 
 class NotificationKit:
@@ -57,16 +60,22 @@ class NotificationKit:
 
 		return response
 
-	def send_email(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
+	def send_email(
+		self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text', *, html_content: str | None = None
+	):
 		if not self.email_user or not self.email_pass or not self.email_to:
 			raise ValueError('Email configuration not set')
 
 		# 如果未设置 EMAIL_SENDER，使用 EMAIL_USER 作为默认值
 		sender = self.email_sender if self.email_sender else self.email_user
 
-		# MIMEText 需要 'plain' 或 'html'，而不是 'text'
-		mime_subtype = 'plain' if msg_type == 'text' else 'html'
-		msg = MIMEText(content, mime_subtype, 'utf-8')
+		msg: MIMEMultipart | MIMEText
+		if msg_type == 'html':
+			msg = MIMEText(content, 'html', 'utf-8')
+		else:
+			msg = MIMEMultipart('alternative')
+			msg.attach(MIMEText(content, 'plain', 'utf-8'))
+			msg.attach(MIMEText(html_content or render_notice_email(title, content), 'html', 'utf-8'))
 		msg['From'] = f'AnyRouter Assistant <{sender}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
@@ -158,9 +167,11 @@ class NotificationKit:
 
 		self._post_json('Bark', url, data)
 
-	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
+	def push_message(
+		self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text', *, email_html: str | None = None
+	):
 		notifications = [
-			('Email', lambda: self.send_email(title, content, msg_type)),
+			('Email', lambda: self.send_email(title, content, msg_type, html_content=email_html)),
 			('PushPlus', lambda: self.send_pushplus(title, content)),
 			('Server Push', lambda: self.send_serverPush(title, content)),
 			('DingTalk', lambda: self.send_dingtalk(title, content)),

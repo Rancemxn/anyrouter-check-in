@@ -37,6 +37,7 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config, validate_github_cookies
 from utils.debug import debug_print, is_debug_enabled
+from utils.email_report import BEIJING, EXPIRY_WARNING_DAYS, format_credential_expiry, render_checkin_email
 from utils.github_oauth import GitHubLoginRequired, login_with_github
 from utils.newapi import NewAPILoginLimitError, login_limit_error, revoke_newapi_session
 from utils.notify import notify
@@ -689,11 +690,31 @@ async def main():
 	need_notify = False
 	has_failures = False
 	balance_changed = False
+	executed_at = datetime.now(BEIJING)
+	email_accounts = []
+	expiry_reminders = []
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		expiry = account.get_credential_expiry()
+		email_account = {
+			'name': account.get_display_name(i),
+			'success': False,
+			'before': None,
+			'after': None,
+			'expiry': expiry,
+			'github': bool(account.github_cookies),
+			'uses_cookies': bool(account.github_cookies or (account.cookies and not account.has_login_credentials())),
+		}
+		email_accounts.append(email_account)
+		if expiry and expiry[0] <= executed_at.timestamp() + EXPIRY_WARNING_DAYS * 86400:
+			action = '重新导出 GitHub 会话并更新账号配置' if account.github_cookies else '重新登录网站并更新 session'
+			expiry_reminders.append(
+				f'[EXPIRY] {account.get_display_name(i)}\n{format_credential_expiry(expiry, executed_at)}\n请{action}。'
+			)
 		try:
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
+			email_account.update(success=success, before=user_info_before, after=user_info_after)
 			if success:
 				success_count += 1
 
@@ -761,6 +782,7 @@ async def main():
 			print(f'[FAILED] {account_name} processing exception: {e}')
 			has_failures = True
 			need_notify = True
+			email_account['error'] = str(e)[:50]
 			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -791,6 +813,9 @@ async def main():
 
 	if os.getenv('NOTIFY_ON_FAILURE_ONLY', '').strip().lower() == 'true':
 		need_notify = has_failures
+	if expiry_reminders:
+		need_notify = True
+		notification_content.extend(expiry_reminders)
 
 	if need_notify and notification_content:
 		summary = [
@@ -806,7 +831,7 @@ async def main():
 		else:
 			summary.append('[ERROR] All accounts check-in failed')
 
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		time_info = f'[TIME] Execution time: {executed_at:%Y-%m-%d %H:%M:%S} (UTC+08:00)'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
@@ -822,7 +847,13 @@ async def main():
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
-		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
+		github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
+		github_repo = os.getenv('GITHUB_REPOSITORY', '').strip()
+		run_url = (
+			f'https://github.com/{github_repo}/actions/runs/{github_run_id}' if github_run_id and github_repo else ''
+		)
+		title, email_html = render_checkin_email(email_accounts, executed_at, run_url)
+		notify.push_message(title, notify_content, msg_type='text', email_html=email_html)
 		print('[NOTIFY] Notification processing completed')
 	else:
 		print('[INFO] No notification required by current policy, notification skipped')

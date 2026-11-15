@@ -3,6 +3,7 @@
 配置管理模块
 """
 
+import base64
 import json
 import math
 import os
@@ -217,6 +218,42 @@ class AccountConfig:
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def get_credential_expiry(self) -> tuple[float, bool] | None:
+		"""返回到期时间戳及是否为估算；不验证或输出 Cookie 内容。"""
+		if self.github_cookies:
+			expiries = [
+				cookie['expires']
+				for cookie in self.github_cookies
+				if cookie.get('name') == 'user_session'
+				and cookie.get('domain') in {'github.com', '.github.com'}
+				and cookie.get('path') == '/'
+				and type(cookie.get('expires')) in (int, float)
+				and math.isfinite(cookie['expires'])
+				and 0 < cookie['expires'] < 253402272000
+			]
+			return (min(expiries), False) if expiries else None
+		if self.provider != 'anyrouter' or self.has_login_credentials():
+			return None
+		cookies = self.cookies
+		if isinstance(cookies, str):
+			cookies = dict(part.strip().split('=', 1) for part in cookies.split(';') if '=' in part)
+		if not isinstance(cookies, dict) or not isinstance(cookies.get('session'), str):
+			return None
+		try:
+			value = cookies['session']
+			issued, payload, signature = base64.b64decode(
+				value + '=' * (-len(value) % 4), altchars=b'-_', validate=True
+			).split(b'|', 2)
+			if not issued.isdigit() or not payload or len(signature) != 32:
+				return None
+			timestamp = int(issued)
+			if not 0 < timestamp <= time.time():
+				return None
+			# shortcut: Any 当前发放 30 天 session，服务端改有效期时需更新；始终标为预计到期。
+			return timestamp + 30 * 86400, True
+		except ValueError:
+			return None
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
